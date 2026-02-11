@@ -2058,7 +2058,10 @@ def format_output_full(ctx, terminal_width=None):
                 line3_parts.append(f"{Colors.BRIGHT_WHITE}resets {resets_at}{Colors.RESET}")
             seven_day = ctx.get('usage_seven_day', 0)
             if seven_day > 0:
-                line3_parts.append(f"{Colors.BRIGHT_WHITE}(7d: {int(seven_day)}%){Colors.RESET}")
+                remaining = max(100 - int(seven_day), 0)
+                reset_time = ctx.get('usage_seven_day_remaining', '')
+                reset_suffix = f" {reset_time}" if reset_time else ''
+                line3_parts.append(f"{Colors.BRIGHT_WHITE}(残{remaining}%{reset_suffix}){Colors.RESET}")
             lines.append(" ".join(line3_parts))
 
     # Line 4: Burn rate
@@ -2630,10 +2633,25 @@ def main():
                 ctx['usage_resets_at'] = ''
             seven_day = usage_data.get('seven_day', {})
             ctx['usage_seven_day'] = seven_day.get('utilization', 0) if seven_day else 0
+            seven_day_resets = seven_day.get('resets_at', '') if seven_day else ''
+            if seven_day_resets:
+                try:
+                    resets_dt = datetime.fromisoformat(seven_day_resets)
+                    now = datetime.now(resets_dt.tzinfo)
+                    delta = resets_dt - now
+                    total_seconds = max(int(delta.total_seconds()), 0)
+                    days = total_seconds // 86400
+                    hours = (total_seconds % 86400) // 3600
+                    ctx['usage_seven_day_remaining'] = f"{days}d{hours}h" if days > 0 else f"{hours}h"
+                except Exception:
+                    ctx['usage_seven_day_remaining'] = ''
+            else:
+                ctx['usage_seven_day_remaining'] = ''
         else:
             ctx['usage_five_hour'] = 0
             ctx['usage_resets_at'] = ''
             ctx['usage_seven_day'] = 0
+            ctx['usage_seven_day_remaining'] = ''
 
         # Select formatter based on display mode and terminal height
         terminal_height = get_terminal_height()
