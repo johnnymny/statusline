@@ -2042,6 +2042,10 @@ def format_output_full(ctx, terminal_width=None):
         if ctx['cache_ratio'] >= 50:
             line2_parts.append(f"{Colors.BRIGHT_GREEN}♻️ {int(ctx['cache_ratio'])}% cached{Colors.RESET}")
 
+        handover = ctx.get('handover_status', '')
+        if handover:
+            line2_parts.append(handover)
+
         lines.append(" ".join(line2_parts))
 
     # Line 3: Session usage (Claude.ai five_hour utilization)
@@ -2652,6 +2656,33 @@ def main():
             ctx['usage_resets_at'] = ''
             ctx['usage_seven_day'] = 0
             ctx['usage_seven_day_remaining'] = ''
+
+        # Handover status (from ~/.claude/handover-status.json)
+        ctx['handover_status'] = ''
+        handover_status_path = Path.home() / '.claude' / 'handover-status.json'
+        try:
+            if handover_status_path.exists():
+                hs = json.loads(handover_status_path.read_text(encoding='utf-8'))
+                # Only show status for this session
+                if hs.get('session_id') == session_id:
+                    phase = hs.get('phase', '')
+                    updated = hs.get('updated_at', '')
+                    step = hs.get('step', 0)
+                    total = hs.get('total', 0)
+                    progress = f" ({step}/{total})" if total else ""
+                    if phase == 'pass1':
+                        ctx['handover_status'] = f"{Colors.BRIGHT_YELLOW}\U0001f4ddHANDOVER extracting{progress}{Colors.RESET}"
+                    elif phase == 'pass2':
+                        ctx['handover_status'] = f"{Colors.BRIGHT_YELLOW}\U0001f4ddHANDOVER merging{progress}{Colors.RESET}"
+                    elif phase == 'error':
+                        ctx['handover_status'] = f"{Colors.BRIGHT_RED}\U0001f4ddHANDOVER failed{Colors.RESET}"
+                    elif phase == 'done' and updated:
+                        done_dt = datetime.fromisoformat(updated)
+                        elapsed = (datetime.now(done_dt.tzinfo) - done_dt).total_seconds()
+                        if elapsed < 60:
+                            ctx['handover_status'] = f"{Colors.BRIGHT_GREEN}\U0001f4ddHANDOVER ready{Colors.RESET}"
+        except Exception:
+            pass
 
         # Select formatter based on display mode and terminal height
         terminal_height = get_terminal_height()
