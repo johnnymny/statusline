@@ -44,10 +44,10 @@ if sys.stderr.encoding != 'utf-8':
 
 # CONSTANTS
 
-# Token compaction threshold - FALLBACK VALUE ONLY
-# Dynamic value is now calculated from API: context_window_size * 0.8
-# This constant is kept for backwards compatibility if API data is unavailable
-COMPACTION_THRESHOLD = 200000 * 0.8  # 80% of 200K tokens (fallback)
+# Autocompact buffer: Claude Code reserves this from context window for summarization
+# Was 45K, reduced to 33K in v2.1.21. Hardcoded in Claude Code (not configurable).
+AUTOCOMPACT_BUFFER_TOKENS = 33000
+COMPACTION_THRESHOLD = 200000 - AUTOCOMPACT_BUFFER_TOKENS  # fallback for older versions
 
 # TWO DISTINCT TOKEN CALCULATION SYSTEMS
 
@@ -2369,8 +2369,8 @@ def main():
         api_used_percentage = api_context.get('used_percentage')  # v2.1.6+
         api_remaining_percentage = api_context.get('remaining_percentage')  # v2.1.6+
 
-        # Dynamic compaction threshold (80% of context window)
-        compaction_threshold = api_context_size * 0.8
+        # Dynamic compaction threshold (context window minus autocompact buffer)
+        compaction_threshold = api_context_size - AUTOCOMPACT_BUFFER_TOKENS
 
         # Extract basic values
         model = data.get('model', {}).get('display_name', 'Unknown')
@@ -2665,7 +2665,7 @@ def main():
                 hs = json.loads(handover_status_path.read_text(encoding='utf-8'))
                 # Only show status for this session
                 if hs.get('session_id') == session_id:
-                    phase = hs.get('phase', '')
+                    phase = hs_phase
                     updated = hs.get('updated_at', '')
                     step = hs.get('step', 0)
                     total = hs.get('total', 0)
