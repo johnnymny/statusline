@@ -7,6 +7,9 @@
 ### Windows対応: ターミナル高さ検出の修正
 `get_terminal_height()` のデフォルト値を4→24に変更。Windows環境ではtput/tmux/isattyが全て失敗し、デフォルト4に落ちる→常に1行ミニマルモードになる問題を修正。
 
+### Compact行: autocompact buffer対応
+compaction閾値の計算を `context_size * 0.8` から `context_size - 33K` に変更。1Mコンテキスト（opus[1m]等）で閾値が800Kではなく967Kと正しく表示される。autocompact bufferは33K固定（Claude Code v2.1.21以降）。
+
 ### カラースキーム: 暗め（dim）に変更
 ANSI dim属性（`\033[2;xxm`）を使用し、全体的に目に優しい暗めの配色に変更。
 
