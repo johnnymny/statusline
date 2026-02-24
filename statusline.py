@@ -2443,6 +2443,12 @@ def format_output_minimal(ctx, terminal_width):
     return [line]
 
 def main():
+    # DEBUG: log invocation timestamps to verify refresh behavior during idle
+    _debug_refresh = os.environ.get('STATUSLINE_DEBUG_REFRESH')
+    if _debug_refresh:
+        with open(Path.home() / '.claude' / 'statusline-refresh.log', 'a', encoding='utf-8') as f:
+            f.write(f"{datetime.now().isoformat()}\n")
+
     # Parse command line arguments
     parser = argparse.ArgumentParser(description='Claude Code statusline with configurable output', add_help=False)
     parser.add_argument('--show', type=str, help='Lines to show: 1,2,3,4 or all (default: use config settings)')
@@ -2639,12 +2645,15 @@ def main():
                     (total_tokens, _, error_count, user_messages, assistant_messages,
                      input_tokens, output_tokens, cache_creation, cache_read) = calculate_tokens_from_transcript(transcript_file)
         
-        # Calculate percentage for Compact display (dynamic threshold)
-        # Prefer API-provided percentage (v2.1.6+) for accuracy, fallback to manual calculation
+        # Calculate percentage for Compact display (compaction threshold basis)
+        # Always use compaction_threshold as denominator so color thresholds align with the bar
         compact_tokens = total_tokens
         if api_used_percentage is not None:
-            # Use Claude Code's pre-calculated percentage (more accurate)
-            percentage = min(100, round(api_used_percentage))
+            # Convert API percentage (context_window basis) to compaction_threshold basis
+            # api_used_percentage = used / context_window * 100
+            # We want: used / compaction_threshold * 100
+            used_tokens = api_used_percentage / 100 * api_context_size
+            percentage = min(100, round((used_tokens / compaction_threshold) * 100))
         else:
             # Fallback: manual calculation for older Claude Code versions
             # NOTE: API tokens (total_input/output_tokens) are CUMULATIVE session totals,
