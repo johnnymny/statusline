@@ -2048,24 +2048,27 @@ def format_output_full(ctx, terminal_width=None):
 
         lines.append(" ".join(line2_parts))
 
-    # Line 3: Session usage (Claude.ai five_hour utilization)
+    # Line 3: Session usage (Claude.ai five_hour utilization + GLM/Codex)
     if ctx['show_line3']:
         usage_pct = ctx.get('usage_five_hour', 0)
-        if usage_pct > 0:
+        service_snippets = format_service_snippets(ctx, 'full')
+        if usage_pct > 0 or service_snippets:
             line3_parts = []
-            usage_color = get_percentage_color(usage_pct)
-            line3_parts.append(f"{Colors.BRIGHT_CYAN}Session:{Colors.RESET}")
-            line3_parts.append(get_progress_bar(usage_pct, width=20))
-            line3_parts.append(f"{usage_color}{Colors.BOLD}[{int(usage_pct)}%]{Colors.RESET}")
-            resets_at = ctx.get('usage_resets_at', '')
-            if resets_at:
-                line3_parts.append(f"{Colors.BRIGHT_WHITE}resets {resets_at}{Colors.RESET}")
-            seven_day = ctx.get('usage_seven_day', 0)
-            if seven_day > 0:
-                remaining = max(100 - int(seven_day), 0)
-                reset_time = ctx.get('usage_seven_day_remaining', '')
-                reset_suffix = f" {reset_time}" if reset_time else ''
-                line3_parts.append(f"{Colors.BRIGHT_WHITE}(残{remaining}%{reset_suffix}){Colors.RESET}")
+            if usage_pct > 0:
+                usage_color = get_percentage_color(usage_pct)
+                line3_parts.append(f"{Colors.BRIGHT_CYAN}Session:{Colors.RESET}")
+                line3_parts.append(get_progress_bar(usage_pct, width=20))
+                line3_parts.append(f"{usage_color}{Colors.BOLD}[{int(usage_pct)}%]{Colors.RESET}")
+                resets_at = ctx.get('usage_resets_at', '')
+                if resets_at:
+                    line3_parts.append(f"{Colors.BRIGHT_WHITE}resets {resets_at}{Colors.RESET}")
+                seven_day = ctx.get('usage_seven_day', 0)
+                if seven_day > 0:
+                    remaining = max(100 - int(seven_day), 0)
+                    reset_time = ctx.get('usage_seven_day_remaining', '')
+                    reset_suffix = f" {reset_time}" if reset_time else ''
+                    line3_parts.append(f"{Colors.BRIGHT_WHITE}(残{remaining}%{reset_suffix}){Colors.RESET}")
+            line3_parts.extend(service_snippets)
             lines.append(" ".join(line3_parts))
 
     # Line 4: Burn rate
@@ -2119,17 +2122,22 @@ def format_output_compact(ctx):
         line2 += f"{Colors.BRIGHT_WHITE}{compact_display}/{threshold_display}{Colors.RESET}"
         lines.append(line2)
 
-    # Line 3: Session usage (shortened)
+    # Line 3: Session usage (shortened + services)
     if ctx['show_line3']:
         usage_pct = ctx.get('usage_five_hour', 0)
-        if usage_pct > 0:
-            usage_color = get_percentage_color(usage_pct)
-            line3 = f"{Colors.BRIGHT_CYAN}S:{Colors.RESET} {get_progress_bar(usage_pct, width=12)} "
-            line3 += f"{usage_color}[{int(usage_pct)}%]{Colors.RESET}"
-            resets_at = ctx.get('usage_resets_at', '')
-            if resets_at:
-                line3 += f" {Colors.BRIGHT_WHITE}→{resets_at}{Colors.RESET}"
-            lines.append(line3)
+        service_snippets = format_service_snippets(ctx, 'compact')
+        if usage_pct > 0 or service_snippets:
+            line3_parts = []
+            if usage_pct > 0:
+                usage_color = get_percentage_color(usage_pct)
+                claude_part = f"{Colors.BRIGHT_CYAN}S:{Colors.RESET} {get_progress_bar(usage_pct, width=12)} "
+                claude_part += f"{usage_color}[{int(usage_pct)}%]{Colors.RESET}"
+                resets_at = ctx.get('usage_resets_at', '')
+                if resets_at:
+                    claude_part += f" {Colors.BRIGHT_WHITE}→{resets_at}{Colors.RESET}"
+                line3_parts.append(claude_part)
+            line3_parts.extend(service_snippets)
+            lines.append(" ".join(line3_parts))
 
     # Line 4: Burn (shortened)
     if ctx['show_line4'] and ctx['burn_timeline']:
@@ -2255,6 +2263,157 @@ def get_claude_usage():
         except Exception:
             pass
         return None
+
+def get_services_usage():
+    """Fetch GLM/Codex usage data with caching via ~/.claude/statusline-services.json"""
+    config_path = Path.home() / '.claude' / 'statusline-services.json'
+    cache_path = Path.home() / '.claude' / 'statusline-services-cache.json'
+
+    try:
+        if not config_path.exists():
+            return {}
+
+        config = json.loads(config_path.read_text(encoding='utf-8'))
+        cache_ttl = config.get('cache_ttl_seconds', 60)
+
+        # Check cache
+        if cache_path.exists():
+            try:
+                cache = json.loads(cache_path.read_text(encoding='utf-8'))
+                fetched_at = cache.get('_fetched_at', 0)
+                if time.time() - fetched_at < cache_ttl:
+                    return cache
+            except Exception:
+                pass
+
+        result = {'_fetched_at': time.time()}
+
+        # GLM (Z.AI)
+        glm_config = config.get('glm')
+        if glm_config:
+            try:
+                keys_file = Path(glm_config['keys_file'])
+                if keys_file.exists():
+                    keys = json.loads(keys_file.read_text(encoding='utf-8'))
+                    api_key = keys.get(glm_config.get('key_name', 'zai'))
+                    if api_key:
+                        glm_data = _fetch_glm_usage(api_key)
+                        if glm_data:
+                            result['glm'] = glm_data
+            except Exception:
+                pass
+
+        # Codex (OpenAI)
+        codex_config = config.get('codex')
+        if codex_config:
+            try:
+                auth_file = Path(codex_config['auth_file'])
+                if auth_file.exists():
+                    auth = json.loads(auth_file.read_text(encoding='utf-8'))
+                    access_token = auth.get('tokens', {}).get('access_token') or auth.get('access_token')
+                    if access_token:
+                        codex_data = _fetch_codex_usage(access_token)
+                        if codex_data:
+                            result['codex'] = codex_data
+            except Exception:
+                pass
+
+        # Write cache
+        try:
+            cache_path.write_text(json.dumps(result), encoding='utf-8')
+        except Exception:
+            pass
+
+        return result
+
+    except Exception:
+        # Return stale cache on failure
+        try:
+            if cache_path.exists():
+                return json.loads(cache_path.read_text(encoding='utf-8'))
+        except Exception:
+            pass
+        return {}
+
+
+def _fetch_glm_usage(api_key):
+    """Fetch Z.AI (GLM) usage quota from /api/monitor/usage/quota/limit"""
+    import urllib.request
+    req = urllib.request.Request(
+        'https://api.z.ai/api/monitor/usage/quota/limit',
+        headers={'Authorization': f'Bearer {api_key}'}
+    )
+    with urllib.request.urlopen(req, timeout=5) as resp:
+        data = json.loads(resp.read())
+
+    result = {}
+    for limit in data.get('data', {}).get('limits', []):
+        unit = limit.get('unit')
+        number = limit.get('number')
+        pct = limit.get('percentage', 0)
+        if unit == 3 and number == 5:  # 5-hour window
+            result['five_hour_pct'] = pct
+            reset_ms = limit.get('nextResetTime')
+            if reset_ms:
+                result['five_hour_resets_ms'] = reset_ms
+        elif unit == 6 and number == 1:  # weekly window
+            result['weekly_pct'] = pct
+
+    return result if result else None
+
+
+def _fetch_codex_usage(access_token):
+    """Fetch OpenAI Codex usage from chatgpt.com/backend-api/wham/usage"""
+    import urllib.request
+    req = urllib.request.Request(
+        'https://chatgpt.com/backend-api/wham/usage',
+        headers={'Authorization': f'Bearer {access_token}'}
+    )
+    with urllib.request.urlopen(req, timeout=5) as resp:
+        data = json.loads(resp.read())
+
+    rate_limit = data.get('rate_limit', {})
+    primary = rate_limit.get('primary_window', {})
+    secondary = rate_limit.get('secondary_window', {})
+
+    five_hour_pct = primary.get('used_percent', 0)
+    weekly_pct = secondary.get('used_percent', 0) if secondary else 0
+
+    if five_hour_pct == 0 and weekly_pct == 0:
+        return None
+
+    result = {'five_hour_pct': five_hour_pct, 'weekly_pct': weekly_pct}
+    reset_after = primary.get('reset_after_seconds')
+    if reset_after:
+        result['reset_after_sec'] = reset_after
+    return result
+
+
+def format_service_snippets(ctx, mode):
+    """Format GLM/Codex usage as short bar+percentage snippets
+
+    Args:
+        ctx: Context dict with glm_five_hour, glm_weekly, codex_five_hour, codex_weekly
+        mode: 'full' (bar+pct+weekly) or 'compact' (bar+pct only)
+    Returns:
+        list[str]: Formatted snippets, empty if no services have usage
+    """
+    snippets = []
+    for name, key_prefix in [('GLM', 'glm'), ('Codex', 'codex')]:
+        five_hour = ctx.get(f'{key_prefix}_five_hour', 0)
+        weekly = ctx.get(f'{key_prefix}_weekly', 0)
+        if five_hour <= 0 and weekly <= 0:
+            continue
+        # width=4 bar with minimum 1 filled block when pct > 0
+        filled = max(1, int(4 * five_hour / 100)) if five_hour > 0 else 0
+        bar = get_percentage_color(five_hour) + '█' * filled + Colors.LIGHT_GRAY + '▒' * (4 - filled) + Colors.RESET
+        color = get_percentage_color(five_hour)
+        snippet = f"{Colors.BRIGHT_WHITE}{name}:{Colors.RESET}{bar}{color}{five_hour}%{Colors.RESET}"
+        if mode == 'full' and weekly > 0:
+            snippet += f"{Colors.BRIGHT_WHITE}(wk{weekly}%){Colors.RESET}"
+        snippets.append(snippet)
+    return snippets
+
 
 def format_output_minimal(ctx, terminal_width):
     """Minimal 1-line mode for short terminal heights (<= 8 lines)
@@ -2656,6 +2815,20 @@ def main():
             ctx['usage_resets_at'] = ''
             ctx['usage_seven_day'] = 0
             ctx['usage_seven_day_remaining'] = ''
+
+        # Fetch GLM/Codex usage data (clamp to 0-100, guard non-dict)
+        services_usage = get_services_usage()
+        if not isinstance(services_usage, dict):
+            services_usage = {}
+        def _clamp_pct(val):
+            try:
+                return max(0, min(100, int(val)))
+            except (TypeError, ValueError):
+                return 0
+        ctx['glm_five_hour'] = _clamp_pct(services_usage.get('glm', {}).get('five_hour_pct', 0))
+        ctx['glm_weekly'] = _clamp_pct(services_usage.get('glm', {}).get('weekly_pct', 0))
+        ctx['codex_five_hour'] = _clamp_pct(services_usage.get('codex', {}).get('five_hour_pct', 0))
+        ctx['codex_weekly'] = _clamp_pct(services_usage.get('codex', {}).get('weekly_pct', 0))
 
         # Handover status (from ~/.claude/handover-status.json)
         ctx['handover_status'] = ''

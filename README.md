@@ -19,12 +19,21 @@ ANSI dim属性（`\033[2;xxm`）を使用し、全体的に目に優しい暗め
 **表示例:**
 ```
 Compact: ██████▒▒▒▒▒▒▒▒▒▒▒▒▒▒ [30%] 50.0K/160.0K
-Session: ██████▒▒▒▒▒▒▒▒▒▒▒▒▒▒ [34%] resets 03:59 (7d: 5%)
+Session: ██████▒▒▒▒▒▒▒▒▒▒▒▒▒▒ [34%] resets 03:59 (残95% 6d8h)  GLM:█▒▒▒15%(wk9%)  Codex:█▒▒▒37%(wk12%)
 ```
 
 - **[34%]**: 5時間ブロックの使用率（Claude.aiダッシュボードと同じ値）
 - **resets 03:59**: リセット時刻（ローカル時間）
-- **(7d: 5%)**: 週間使用率
+- **(残95% 6d8h)**: 週間残量とリセットまでの時間
+- **GLM/Codex**: 外部サービスの使用率（5時間 + 週間）
+
+### 外部サービス使用率の統合表示 (GLM / Codex)
+Session行にZ.AI (GLM) と OpenAI (Codex) の使用率を並列表示。`~/.claude/statusline-services.json` で設定。
+
+- サービスごとに5時間バー(width=4) + 数値% + 週間%を表示
+- 設定ファイルなし → サービス表示スキップ（graceful degradation）
+- 各サービスのauth失敗 → そのサービスだけスキップ
+- 60秒キャッシュ（TTL設定可能）
 
 ## セットアップ
 
@@ -92,7 +101,29 @@ macOS/Linuxの場合:
 - APIは60秒間キャッシュされる（`cache_ttl_seconds` で変更可能）
 - API取得に失敗した場合、前回のキャッシュ値を表示する
 
-### 5. 表示設定
+### 5. 外部サービス使用率 (任意)
+
+`~/.claude/statusline-services.json` を作成:
+
+```json
+{
+  "glm": {
+    "keys_file": "/path/to/llm/keys.json",
+    "key_name": "zai"
+  },
+  "codex": {
+    "auth_file": "/path/to/.codex/auth.json"
+  },
+  "cache_ttl_seconds": 60
+}
+```
+
+- **glm**: Z.AI (GLM) の使用率。`keys_file` は [llm](https://github.com/simonw/llm) の鍵ファイル、`key_name` はその中のキー名
+- **codex**: OpenAI Codex の使用率。`auth_file` は Codex CLI の認証ファイル（`access_token` を含むJSON）
+- 不要なサービスはキーごと省略可能
+- ファイル自体が存在しなければ全サービスをスキップ
+
+### 6. 表示設定
 
 `statusline.py` 冒頭の設定で表示行を選択:
 
