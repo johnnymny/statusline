@@ -2443,12 +2443,6 @@ def format_output_minimal(ctx, terminal_width):
     return [line]
 
 def main():
-    # DEBUG: log invocation timestamps to verify refresh behavior during idle
-    _debug_refresh = os.environ.get('STATUSLINE_DEBUG_REFRESH')
-    if _debug_refresh:
-        with open(Path.home() / '.claude' / 'statusline-refresh.log', 'a', encoding='utf-8') as f:
-            f.write(f"{datetime.now().isoformat()}\n")
-
     # Parse command line arguments
     parser = argparse.ArgumentParser(description='Claude Code statusline with configurable output', add_help=False)
     parser.add_argument('--show', type=str, help='Lines to show: 1,2,3,4 or all (default: use config settings)')
