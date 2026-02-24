@@ -2398,17 +2398,19 @@ def format_service_snippets(ctx, mode):
     Returns:
         list[str]: Formatted snippets, empty if no services have usage
     """
+    SERVICE_COLORS = {'GLM': Colors.BRIGHT_CYAN, 'Codex': Colors.BRIGHT_YELLOW}
     snippets = []
     for name, key_prefix in [('GLM', 'glm'), ('Codex', 'codex')]:
         five_hour = ctx.get(f'{key_prefix}_five_hour', 0)
         weekly = ctx.get(f'{key_prefix}_weekly', 0)
         if five_hour <= 0 and weekly <= 0:
             continue
+        label_color = SERVICE_COLORS.get(name, Colors.BRIGHT_WHITE)
         # width=4 bar with minimum 1 filled block when pct > 0
         filled = max(1, int(4 * five_hour / 100)) if five_hour > 0 else 0
         bar = get_percentage_color(five_hour) + '█' * filled + Colors.LIGHT_GRAY + '▒' * (4 - filled) + Colors.RESET
         color = get_percentage_color(five_hour)
-        snippet = f"{Colors.BRIGHT_WHITE}{name}:{Colors.RESET}{bar}{color}{five_hour}%{Colors.RESET}"
+        snippet = f"{label_color}{name}:{Colors.RESET}{bar}{color}{five_hour}%{Colors.RESET}"
         if mode == 'full' and weekly > 0:
             snippet += f"{Colors.BRIGHT_WHITE}(wk{weekly}%){Colors.RESET}"
         snippets.append(snippet)
