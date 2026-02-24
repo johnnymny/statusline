@@ -2026,7 +2026,7 @@ def format_output_full(ctx, terminal_width=None):
         compact_display = format_token_count(ctx['compact_tokens'])
         percentage_color = get_percentage_color(percentage)
 
-        if percentage >= 85:
+        if percentage >= 90:
             title_color = f"{Colors.BG_RED}{Colors.BRIGHT_WHITE}{Colors.BOLD}"
             percentage_display = f"{Colors.BG_RED}{Colors.BRIGHT_WHITE}{Colors.BOLD}[{percentage}%]{Colors.RESET}"
             compact_label = f"{title_color}Compact:{Colors.RESET}"
