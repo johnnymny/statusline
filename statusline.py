@@ -2064,10 +2064,9 @@ def format_output_full(ctx, terminal_width=None):
                     line3_parts.append(f"{Colors.BRIGHT_WHITE}resets {resets_at}{Colors.RESET}")
                 seven_day = ctx.get('usage_seven_day', 0)
                 if seven_day > 0:
-                    remaining = max(100 - int(seven_day), 0)
                     reset_time = ctx.get('usage_seven_day_remaining', '')
                     reset_suffix = f" {reset_time}" if reset_time else ''
-                    line3_parts.append(f"{Colors.BRIGHT_WHITE}(残{remaining}%{reset_suffix}){Colors.RESET}")
+                    line3_parts.append(f"{Colors.BRIGHT_WHITE}(wk{int(seven_day)}%{reset_suffix}){Colors.RESET}")
             line3_parts.extend(service_snippets)
             lines.append(" ".join(line3_parts))
 
