@@ -2385,6 +2385,10 @@ def _fetch_codex_usage(access_token):
     reset_after = primary.get('reset_after_seconds')
     if reset_after:
         result['reset_after_sec'] = reset_after
+    if secondary:
+        weekly_reset_at = secondary.get('reset_at')
+        if weekly_reset_at:
+            result['weekly_reset_at'] = weekly_reset_at
     return result
 
 
@@ -2411,7 +2415,20 @@ def format_service_snippets(ctx, mode):
         color = get_percentage_color(five_hour)
         snippet = f"{label_color}{name}:{Colors.RESET}{bar}{color}{five_hour}%{Colors.RESET}"
         if mode == 'full' and weekly > 0:
-            snippet += f"{Colors.BRIGHT_WHITE}(wk{weekly}%){Colors.RESET}"
+            reset_at = ctx.get(f'{key_prefix}_weekly_reset_at', 0)
+            reset_suffix = ''
+            if reset_at:
+                remaining = int(reset_at - time.time())
+                if remaining > 0:
+                    hours = remaining // 3600
+                    mins = (remaining % 3600) // 60
+                    if hours >= 24:
+                        days = hours // 24
+                        hours = hours % 24
+                        reset_suffix = f' {days}d{hours}h'
+                    else:
+                        reset_suffix = f' {hours}h{mins:02d}m'
+            snippet += f"{Colors.BRIGHT_WHITE}(wk{weekly}%{reset_suffix}){Colors.RESET}"
         snippets.append(snippet)
     return snippets
 
@@ -2833,6 +2850,7 @@ def main():
         ctx['glm_weekly'] = _clamp_pct(services_usage.get('glm', {}).get('weekly_pct', 0))
         ctx['codex_five_hour'] = _clamp_pct(services_usage.get('codex', {}).get('five_hour_pct', 0))
         ctx['codex_weekly'] = _clamp_pct(services_usage.get('codex', {}).get('weekly_pct', 0))
+        ctx['codex_weekly_reset_at'] = services_usage.get('codex', {}).get('weekly_reset_at', 0)
 
         # Handover status (from ~/.claude/handover-status.json)
         ctx['handover_status'] = ''
