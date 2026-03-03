@@ -2357,6 +2357,9 @@ def _fetch_glm_usage(api_key):
                 result['five_hour_resets_ms'] = reset_ms
         elif unit == 6 and number == 1:  # weekly window
             result['weekly_pct'] = pct
+            reset_ms = limit.get('nextResetTime')
+            if reset_ms:
+                result['weekly_reset_at'] = reset_ms / 1000  # ms → epoch sec
 
     return result if result else None
 
@@ -2848,6 +2851,7 @@ def main():
                 return 0
         ctx['glm_five_hour'] = _clamp_pct(services_usage.get('glm', {}).get('five_hour_pct', 0))
         ctx['glm_weekly'] = _clamp_pct(services_usage.get('glm', {}).get('weekly_pct', 0))
+        ctx['glm_weekly_reset_at'] = services_usage.get('glm', {}).get('weekly_reset_at', 0)
         ctx['codex_five_hour'] = _clamp_pct(services_usage.get('codex', {}).get('five_hour_pct', 0))
         ctx['codex_weekly'] = _clamp_pct(services_usage.get('codex', {}).get('weekly_pct', 0))
         ctx['codex_weekly_reset_at'] = services_usage.get('codex', {}).get('weekly_reset_at', 0)
