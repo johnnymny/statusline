@@ -33,6 +33,7 @@ import re
 import unicodedata
 from pathlib import Path
 from datetime import datetime, timedelta, timezone, date
+from urllib.parse import urlparse
 import time
 from collections import defaultdict
 
@@ -87,6 +88,7 @@ class Colors:
         'BRIGHT_MAGENTA': '\033[2;35m',
         'BRIGHT_GREEN': '\033[2;32m',
         'BRIGHT_YELLOW': '\033[2;33m',
+        'BRIGHT_ORANGE': '\033[2;38;5;208m',
         'BRIGHT_RED': '\033[2;31m',
         'BRIGHT_WHITE': '\033[90m',
         'LIGHT_GRAY': '\033[90m',
@@ -586,19 +588,148 @@ def find_session_transcript(session_id):
     """Find transcript file for the current session"""
     if not session_id:
         return None
-    
+
     projects_dir = Path.home() / '.claude' / 'projects'
-    
+
     if not projects_dir.exists():
         return None
-    
+
     for project_dir in projects_dir.iterdir():
         if project_dir.is_dir():
             transcript_file = project_dir / f"{session_id}.jsonl"
             if transcript_file.exists():
                 return transcript_file
-    
+
     return None
+
+
+def get_current_proxy_port():
+    """Extract localhost proxy port from ANTHROPIC_BASE_URL in custom-provider runtime."""
+    try:
+        base_url = os.environ.get('ANTHROPIC_BASE_URL', '')
+        if not base_url:
+            return None
+        parsed = urlparse(base_url)
+        if parsed.hostname not in ('127.0.0.1', 'localhost'):
+            return None
+        return parsed.port
+    except Exception:
+        return None
+
+
+def get_latest_compact_boundary_timestamp(transcript_file):
+    """Return latest compact_boundary timestamp from transcript, or None."""
+    if not transcript_file or not transcript_file.exists():
+        return None
+
+    latest = None
+    try:
+        with open(transcript_file, 'r', encoding='utf-8') as f:
+            for line in f:
+                try:
+                    entry = json.loads(line.strip())
+                except json.JSONDecodeError:
+                    continue
+                if entry.get('type') == 'system' and entry.get('subtype') == 'compact_boundary':
+                    ts = entry.get('timestamp')
+                    if not ts:
+                        continue
+                    dt = datetime.fromisoformat(ts.replace('Z', '+00:00'))
+                    latest = dt.astimezone(timezone.utc)
+        return latest
+    except Exception:
+        return None
+
+
+def get_latest_claudex_usage_sample(proxy_port, compact_boundary_utc=None):
+    """Read latest proxy usage sample after compact boundary for this port."""
+    if not proxy_port:
+        return None
+
+    log_path = Path.home() / '.claude' / 'claudex-usage' / f'port-{proxy_port}.jsonl'
+    if not log_path.exists():
+        return None
+
+    latest = None
+    try:
+        with open(log_path, 'r', encoding='utf-8') as f:
+            for line in f:
+                try:
+                    entry = json.loads(line.strip())
+                except json.JSONDecodeError:
+                    continue
+                ts = entry.get('timestamp')
+                if not ts:
+                    continue
+                dt = datetime.fromisoformat(ts.replace('Z', '+00:00')).astimezone(timezone.utc)
+                if compact_boundary_utc and dt <= compact_boundary_utc:
+                    continue
+                latest = entry
+        return latest
+    except Exception:
+        return None
+
+
+def get_latest_codex_context_window(model_name):
+    """Read the latest model_context_window for the same model from local .codex session logs."""
+    if not model_name:
+        return None
+
+    sessions_root = Path.home() / '.codex' / 'sessions'
+    if not sessions_root.exists():
+        return None
+
+    latest_ts = None
+    latest_window = None
+    try:
+        for jsonl_path in sessions_root.rglob('*.jsonl'):
+            try:
+                with open(jsonl_path, 'r', encoding='utf-8') as f:
+                    current_model = None
+                    for line in f:
+                        try:
+                            entry = json.loads(line.strip())
+                        except json.JSONDecodeError:
+                            continue
+
+                        payload = entry.get('payload', {}) or {}
+                        if entry.get('type') == 'turn_context':
+                            current_model = payload.get('model')
+
+                        if current_model != model_name:
+                            continue
+
+                        model_context_window = None
+                        if entry.get('type') == 'event_msg':
+                            model_context_window = payload.get('model_context_window')
+                            if model_context_window is None:
+                                info = payload.get('info', {}) or {}
+                                model_context_window = info.get('model_context_window')
+
+                        if not model_context_window:
+                            continue
+
+                        ts = entry.get('timestamp')
+                        if not ts:
+                            continue
+                        dt = datetime.fromisoformat(ts.replace('Z', '+00:00')).astimezone(timezone.utc)
+                        if latest_ts is None or dt > latest_ts:
+                            latest_ts = dt
+                            latest_window = int(model_context_window)
+            except Exception:
+                continue
+        return latest_window
+    except Exception:
+        return None
+
+
+def get_compact_threshold_for_runtime(model_name, default_threshold):
+    """Use Codex model context window when available; otherwise keep existing threshold."""
+    model_context_window = get_latest_codex_context_window(model_name)
+    if model_context_window and model_context_window > AUTOCOMPACT_BUFFER_TOKENS:
+        return model_context_window - AUTOCOMPACT_BUFFER_TOKENS
+    return default_threshold
+
 
 def find_all_transcript_files(hours_limit=6):
     """Find transcript files updated within the specified time limit
@@ -2048,25 +2179,31 @@ def format_output_full(ctx, terminal_width=None):
 
         lines.append(" ".join(line2_parts))
 
-    # Line 3: Session usage (Claude.ai five_hour utilization + GLM/Codex)
+    # Line 3: Session usage (runtime-aware primary + secondary services)
     if ctx['show_line3']:
-        usage_pct = ctx.get('usage_five_hour', 0)
-        service_snippets = format_service_snippets(ctx, 'full')
-        if usage_pct > 0 or service_snippets:
+        primary = get_primary_session_data(ctx)
+        usage_pct = primary['five_hour']
+        service_snippets = format_service_snippets(
+            ctx,
+            'full',
+            include_claude=primary['include_claude_secondary'],
+            include_codex=primary['include_codex_secondary'],
+        )
+        if usage_pct > 0 or primary['weekly'] > 0 or service_snippets:
             line3_parts = []
-            if usage_pct > 0:
-                usage_color = get_percentage_color(usage_pct)
-                line3_parts.append(f"{Colors.BRIGHT_CYAN}Session:{Colors.RESET}")
-                line3_parts.append(get_progress_bar(usage_pct, width=20))
-                line3_parts.append(f"{usage_color}{Colors.BOLD}[{int(usage_pct)}%]{Colors.RESET}")
-                resets_at = ctx.get('usage_resets_at', '')
-                if resets_at:
-                    line3_parts.append(f"{Colors.BRIGHT_WHITE}resets {resets_at}{Colors.RESET}")
-                seven_day = ctx.get('usage_seven_day', 0)
-                if seven_day > 0:
-                    reset_time = ctx.get('usage_seven_day_remaining', '')
-                    reset_suffix = f" {reset_time}" if reset_time else ''
-                    line3_parts.append(f"{Colors.BRIGHT_WHITE}(wk{int(seven_day)}%{reset_suffix}){Colors.RESET}")
+            line3_parts.append(f"{primary['label_color']}{primary['name']}:{Colors.RESET}")
+            line3_parts.append(get_progress_bar(usage_pct, width=20))
+            usage_color = get_percentage_color(usage_pct)
+            line3_parts.append(f"{usage_color}{Colors.BOLD}[{int(usage_pct)}%]{Colors.RESET}")
+            if primary['resets_at']:
+                line3_parts.append(f"{Colors.BRIGHT_WHITE}resets {primary['resets_at']}{Colors.RESET}")
+            if primary['weekly'] > 0:
+                reset_suffix = format_weekly_usage_suffix(
+                    primary['weekly'],
+                    primary['weekly_reset_at'],
+                    primary['weekly_remaining'],
+                )
+                line3_parts.append(f"{Colors.BRIGHT_WHITE}(wk{int(primary['weekly'])}%{reset_suffix}){Colors.RESET}")
             line3_parts.extend(service_snippets)
             lines.append(" ".join(line3_parts))
 
@@ -2121,20 +2258,24 @@ def format_output_compact(ctx):
         line2 += f"{Colors.BRIGHT_WHITE}{compact_display}/{threshold_display}{Colors.RESET}"
         lines.append(line2)
 
-    # Line 3: Session usage (shortened + services)
+    # Line 3: Session usage (shortened + runtime-aware services)
     if ctx['show_line3']:
-        usage_pct = ctx.get('usage_five_hour', 0)
-        service_snippets = format_service_snippets(ctx, 'compact')
-        if usage_pct > 0 or service_snippets:
+        primary = get_primary_session_data(ctx)
+        usage_pct = primary['five_hour']
+        service_snippets = format_service_snippets(
+            ctx,
+            'compact',
+            include_claude=primary['include_claude_secondary'],
+            include_codex=primary['include_codex_secondary'],
+        )
+        if usage_pct > 0 or primary['weekly'] > 0 or service_snippets:
             line3_parts = []
-            if usage_pct > 0:
-                usage_color = get_percentage_color(usage_pct)
-                claude_part = f"{Colors.BRIGHT_CYAN}S:{Colors.RESET} {get_progress_bar(usage_pct, width=12)} "
-                claude_part += f"{usage_color}[{int(usage_pct)}%]{Colors.RESET}"
-                resets_at = ctx.get('usage_resets_at', '')
-                if resets_at:
-                    claude_part += f" {Colors.BRIGHT_WHITE}→{resets_at}{Colors.RESET}"
-                line3_parts.append(claude_part)
+            usage_color = get_percentage_color(usage_pct)
+            primary_part = f"{primary['label_color']}{primary['short_label']}:{Colors.RESET} {get_progress_bar(usage_pct, width=12)} "
+            primary_part += f"{usage_color}[{int(usage_pct)}%]{Colors.RESET}"
+            if primary['resets_at']:
+                primary_part += f" {Colors.BRIGHT_WHITE}→{primary['resets_at']}{Colors.RESET}"
+            line3_parts.append(primary_part)
             line3_parts.extend(service_snippets)
             lines.append(" ".join(line3_parts))
 
@@ -2185,10 +2326,11 @@ def format_output_tight(ctx):
 
     # Line 3: Session usage (ultra short)
     if ctx['show_line3']:
-        usage_pct = ctx.get('usage_five_hour', 0)
-        if usage_pct > 0:
+        primary = get_primary_session_data(ctx)
+        usage_pct = primary['five_hour']
+        if usage_pct > 0 or primary['weekly'] > 0:
             usage_color = get_percentage_color(usage_pct)
-            line3 = f"{Colors.BRIGHT_CYAN}S:{Colors.RESET} {get_progress_bar(usage_pct, width=8)} "
+            line3 = f"{primary['label_color']}{primary['short_label']}:{Colors.RESET} {get_progress_bar(usage_pct, width=8)} "
             line3 += f"{usage_color}[{int(usage_pct)}%]{Colors.RESET}"
             lines.append(line3)
 
@@ -2395,44 +2537,115 @@ def _fetch_codex_usage(access_token):
     return result
 
 
-def format_service_snippets(ctx, mode):
-    """Format GLM/Codex usage as short bar+percentage snippets
+def format_weekly_usage_suffix(weekly, weekly_reset_at=0, weekly_remaining=''):
+    """Format weekly reset suffix for usage displays."""
+    if weekly <= 0:
+        return ''
 
-    Args:
-        ctx: Context dict with glm_five_hour, glm_weekly, codex_five_hour, codex_weekly
-        mode: 'full' (bar+pct+weekly) or 'compact' (bar+pct only)
-    Returns:
-        list[str]: Formatted snippets, empty if no services have usage
-    """
-    SERVICE_COLORS = {'GLM': Colors.BRIGHT_CYAN, 'Codex': Colors.BRIGHT_YELLOW}
+    if weekly_remaining:
+        return f' {weekly_remaining}'
+
+    if not weekly_reset_at:
+        return ''
+
+    try:
+        remaining = int(weekly_reset_at - time.time())
+        if remaining <= 0:
+            return ''
+        hours = remaining // 3600
+        mins = (remaining % 3600) // 60
+        if hours >= 24:
+            days = hours // 24
+            hours = hours % 24
+            return f' {days}d{hours}h'
+        return f' {hours}h{mins:02d}m'
+    except Exception:
+        return ''
+
+
+def format_usage_snippet(name, five_hour, weekly, mode, label_color, weekly_reset_at=0, weekly_remaining='', show_when_zero=False):
+    """Format a single secondary usage snippet."""
+    if not show_when_zero and five_hour <= 0 and weekly <= 0:
+        return None
+
+    filled = max(1, int(4 * five_hour / 100)) if five_hour > 0 else 0
+    bar = get_percentage_color(five_hour) + '█' * filled + Colors.LIGHT_GRAY + '▒' * (4 - filled) + Colors.RESET
+    color = get_percentage_color(five_hour)
+    snippet = f"{label_color}{name}:{Colors.RESET}{bar}{color}{five_hour}%{Colors.RESET}"
+    if mode == 'full' and weekly > 0:
+        reset_suffix = format_weekly_usage_suffix(weekly, weekly_reset_at, weekly_remaining)
+        snippet += f"{Colors.BRIGHT_WHITE}(wk{weekly}%{reset_suffix}){Colors.RESET}"
+    return snippet
+
+
+def get_primary_session_data(ctx):
+    """Return the primary Session line source for the current runtime."""
+    use_codex_primary = ctx.get('is_codex_runtime', False) and (
+        ctx.get('codex_five_hour', 0) > 0 or ctx.get('codex_weekly', 0) > 0
+    )
+
+    if use_codex_primary:
+        return {
+            'name': 'Session',
+            'short_label': 'S',
+            'label_color': Colors.BRIGHT_CYAN,
+            'five_hour': ctx.get('codex_five_hour', 0),
+            'weekly': ctx.get('codex_weekly', 0),
+            'resets_at': ctx.get('codex_resets_at', ''),
+            'weekly_reset_at': ctx.get('codex_weekly_reset_at', 0),
+            'weekly_remaining': '',
+            'include_claude_secondary': True,
+            'include_codex_secondary': False,
+        }
+
+    return {
+        'name': 'Session',
+        'short_label': 'S',
+        'label_color': Colors.BRIGHT_CYAN,
+        'five_hour': ctx.get('usage_five_hour', 0),
+        'weekly': ctx.get('usage_seven_day', 0),
+        'resets_at': ctx.get('usage_resets_at', ''),
+        'weekly_reset_at': 0,
+        'weekly_remaining': ctx.get('usage_seven_day_remaining', ''),
+        'include_claude_secondary': False,
+        'include_codex_secondary': True,
+    }
+
+
+def format_service_snippets(ctx, mode, include_claude=False, include_codex=True):
+    """Format secondary usage snippets for Line 3."""
     snippets = []
-    for name, key_prefix in [('GLM', 'glm'), ('Codex', 'codex')]:
-        five_hour = ctx.get(f'{key_prefix}_five_hour', 0)
-        weekly = ctx.get(f'{key_prefix}_weekly', 0)
-        if five_hour <= 0 and weekly <= 0:
+
+    if include_claude:
+        claude_snippet = format_usage_snippet(
+            'Claude',
+            ctx.get('usage_five_hour', 0),
+            ctx.get('usage_seven_day', 0),
+            mode,
+            Colors.BRIGHT_ORANGE,
+            weekly_remaining=ctx.get('usage_seven_day_remaining', ''),
+            show_when_zero=True,
+        )
+        if claude_snippet:
+            snippets.append(claude_snippet)
+
+    for name, key_prefix, label_color in [
+        ('GLM', 'glm', Colors.BRIGHT_CYAN),
+        ('Codex', 'codex', Colors.BRIGHT_YELLOW),
+    ]:
+        if name == 'Codex' and not include_codex:
             continue
-        label_color = SERVICE_COLORS.get(name, Colors.BRIGHT_WHITE)
-        # width=4 bar with minimum 1 filled block when pct > 0
-        filled = max(1, int(4 * five_hour / 100)) if five_hour > 0 else 0
-        bar = get_percentage_color(five_hour) + '█' * filled + Colors.LIGHT_GRAY + '▒' * (4 - filled) + Colors.RESET
-        color = get_percentage_color(five_hour)
-        snippet = f"{label_color}{name}:{Colors.RESET}{bar}{color}{five_hour}%{Colors.RESET}"
-        if mode == 'full' and weekly > 0:
-            reset_at = ctx.get(f'{key_prefix}_weekly_reset_at', 0)
-            reset_suffix = ''
-            if reset_at:
-                remaining = int(reset_at - time.time())
-                if remaining > 0:
-                    hours = remaining // 3600
-                    mins = (remaining % 3600) // 60
-                    if hours >= 24:
-                        days = hours // 24
-                        hours = hours % 24
-                        reset_suffix = f' {days}d{hours}h'
-                    else:
-                        reset_suffix = f' {hours}h{mins:02d}m'
-            snippet += f"{Colors.BRIGHT_WHITE}(wk{weekly}%{reset_suffix}){Colors.RESET}"
-        snippets.append(snippet)
+        snippet = format_usage_snippet(
+            name,
+            ctx.get(f'{key_prefix}_five_hour', 0),
+            ctx.get(f'{key_prefix}_weekly', 0),
+            mode,
+            label_color,
+            weekly_reset_at=ctx.get(f'{key_prefix}_weekly_reset_at', 0),
+        )
+        if snippet:
+            snippets.append(snippet)
+
     return snippets
 
 
@@ -2549,11 +2762,12 @@ def main():
         api_used_percentage = api_context.get('used_percentage')  # v2.1.6+
         api_remaining_percentage = api_context.get('remaining_percentage')  # v2.1.6+
 
-        # Dynamic compaction threshold (context window minus autocompact buffer)
-        compaction_threshold = api_context_size - AUTOCOMPACT_BUFFER_TOKENS
-
         # Extract basic values
         model = data.get('model', {}).get('display_name', 'Unknown')
+
+        # Dynamic compaction threshold (context window minus autocompact buffer)
+        compaction_threshold = api_context_size - AUTOCOMPACT_BUFFER_TOKENS
+        codex_compaction_threshold = get_compact_threshold_for_runtime(model, compaction_threshold)
         
         workspace = data.get('workspace', {})
         current_dir = os.path.basename(workspace.get('current_dir', data.get('cwd', '.')))
@@ -2573,6 +2787,8 @@ def main():
         output_tokens = 0
         cache_creation = 0
         cache_read = 0
+        compact_boundary_utc = None
+        proxy_port = get_current_proxy_port()
         
         # 5時間ブロック検出システム
         block_stats = None
@@ -2617,6 +2833,7 @@ def main():
                     transcript_file = find_session_transcript(session_id)
 
                 if transcript_file and transcript_file.exists():
+                    compact_boundary_utc = get_latest_compact_boundary_timestamp(transcript_file)
                     try:
                         (total_tokens, _, error_count, user_messages, assistant_messages,
                          input_tokens, output_tokens, cache_creation, cache_read) = calculate_tokens_from_transcript(transcript_file)
@@ -2655,23 +2872,30 @@ def main():
                     transcript_file = find_session_transcript(session_id)
 
                 if transcript_file and transcript_file.exists():
+                    compact_boundary_utc = get_latest_compact_boundary_timestamp(transcript_file)
                     (total_tokens, _, error_count, user_messages, assistant_messages,
                      input_tokens, output_tokens, cache_creation, cache_read) = calculate_tokens_from_transcript(transcript_file)
         
         # Calculate percentage for Compact display (compaction threshold basis)
-        # Always use compaction_threshold as denominator so color thresholds align with the bar
-        compact_tokens = total_tokens
-        if api_used_percentage is not None:
-            # Convert API percentage (context_window basis) to compaction_threshold basis
-            # api_used_percentage = used / context_window * 100
-            # We want: used / compaction_threshold * 100
-            used_tokens = api_used_percentage / 100 * api_context_size
-            percentage = min(100, round((used_tokens / compaction_threshold) * 100))
-        else:
-            # Fallback: manual calculation for older Claude Code versions
-            # NOTE: API tokens (total_input/output_tokens) are CUMULATIVE session totals,
-            # NOT current context window usage. Must use transcript-calculated tokens.
+        # Custom-provider runtime: prefer latest proxy usage sample after compact boundary.
+        proxy_usage_sample = get_latest_claudex_usage_sample(proxy_port, compact_boundary_utc)
+        if proxy_usage_sample:
+            compaction_threshold = codex_compaction_threshold
+            compact_tokens = int(proxy_usage_sample.get('input_tokens', 0) or 0) + int(proxy_usage_sample.get('output_tokens', 0) or 0)
             percentage = min(100, round((compact_tokens / compaction_threshold) * 100))
+        else:
+            compact_tokens = total_tokens
+            if api_used_percentage is not None:
+                # Convert API percentage (context_window basis) to compaction_threshold basis
+                # api_used_percentage = used / context_window * 100
+                # We want: used / compaction_threshold * 100
+                used_tokens = api_used_percentage / 100 * api_context_size
+                percentage = min(100, round((used_tokens / compaction_threshold) * 100))
+            else:
+                # Fallback: manual calculation for older Claude Code versions
+                # NOTE: API tokens (total_input/output_tokens) are CUMULATIVE session totals,
+                # NOT current context window usage. Must use transcript-calculated tokens.
+                percentage = min(100, round((compact_tokens / compaction_threshold) * 100))
         
         # Get additional info
         active_files = len(workspace.get('active_files', []))
@@ -2801,6 +3025,7 @@ def main():
             'show_line3': SHOW_LINE3,
             'show_line4': SHOW_LINE4,
             'show_schedule': SHOW_SCHEDULE or args.schedule,
+            'is_codex_runtime': bool(proxy_port),
         }
 
         # Fetch Claude.ai usage data
@@ -2855,6 +3080,14 @@ def main():
         ctx['codex_five_hour'] = _clamp_pct(services_usage.get('codex', {}).get('five_hour_pct', 0))
         ctx['codex_weekly'] = _clamp_pct(services_usage.get('codex', {}).get('weekly_pct', 0))
         ctx['codex_weekly_reset_at'] = services_usage.get('codex', {}).get('weekly_reset_at', 0)
+        codex_reset_after = services_usage.get('codex', {}).get('reset_after_sec', 0)
+        if codex_reset_after:
+            try:
+                ctx['codex_resets_at'] = (datetime.now() + timedelta(seconds=int(codex_reset_after))).strftime("%H:%M")
+            except Exception:
+                ctx['codex_resets_at'] = ''
+        else:
+            ctx['codex_resets_at'] = ''
 
         # Handover status (from ~/.claude/handover-status.json)
         ctx['handover_status'] = ''
