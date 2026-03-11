@@ -24,7 +24,6 @@ ANSI dim属性（`\033[2;xxm`）を使用し、全体的に目に優しい暗め
 
 - **通常の Claude runtime**: Claude.ai Usage API（`five_hour.utilization` / `seven_day`）を主表示
 - **claudex runtime**: Codex の 5時間 / 週間使用率を主表示し、Claude 側は副表示に回す
-- Claude 副表示は 5時間が **0% でも非表示にしない**（正しい 0% をそのまま出す）
 
 **表示例（通常 runtime）:**
 ```
