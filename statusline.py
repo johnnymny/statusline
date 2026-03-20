@@ -380,25 +380,45 @@ def calculate_dynamic_padding(compact_text, session_text):
     else:
         return ' '
 
-def get_progress_bar(percentage, width=20, show_current_segment=False):
-    """Create a visual progress bar with optional current segment highlighting"""
-    filled = int(width * percentage / 100)
-    empty = width - filled
-    
-    color = get_percentage_color(percentage)
-    
-    if show_current_segment and filled < width:
-        # 完了済みは元の色を保持、現在進行中のセグメントのみ特別表示
-        completed_bar = color + '█' * filled if filled > 0 else ''
-        current_bar = Colors.BRIGHT_WHITE + '▓' + Colors.RESET  # 白く点滅風
-        remaining_bar = Colors.LIGHT_GRAY + '▒' * (empty - 1) + Colors.RESET if empty > 1 else ''
-        
-        bar = completed_bar + current_bar + remaining_bar
+def _truecolor_gradient(pct):
+    """TrueColor gradient: green → yellow → red based on percentage"""
+    pct = min(max(pct, 0), 100)
+    if pct < 50:
+        r = int(pct * 5.1)
+        return f'\033[38;2;{r};200;80m'
     else:
-        # 従来の表示
-        bar = color + '█' * filled + Colors.LIGHT_GRAY + '▒' * empty + Colors.RESET
-    
-    return bar
+        g = int(200 - (pct - 50) * 4)
+        return f'\033[38;2;255;{max(g, 0)};60m'
+
+BRAILLE_CHARS = ' ⡀⡄⡆⡇⣇⣧⣷⣿'
+
+BAR_BG = '\033[48;2;25;35;25m'  # dark background for bar track
+
+def get_progress_bar(percentage, total_dots=100, show_current_segment=False, min_one_dot=False):
+    """Create a braille dot progress bar with TrueColor gradient.
+
+    total_dots: total number of braille dots representing 100%.
+                Default 100 = 1 dot per 1% (12 full chars + 1 half char = 13 chars).
+    """
+    percentage = min(max(percentage, 0), 100)
+    filled_dots = int(percentage * total_dots / 100)
+    if min_one_dot and percentage > 0 and filled_dots == 0:
+        filled_dots = 1
+    color = _truecolor_gradient(percentage)
+    bar = ''
+    remaining = filled_dots
+    chars_needed = (total_dots + 7) // 8  # ceil(total_dots / 8)
+    for i in range(chars_needed):
+        cap = min(8, total_dots - i * 8)  # last char may have fewer dots
+        if remaining >= cap:
+            bar += BRAILLE_CHARS[cap]
+            remaining -= cap
+        elif remaining <= 0:
+            bar += ' '
+        else:
+            bar += BRAILLE_CHARS[remaining]
+            remaining = 0
+    return BAR_BG + color + bar + Colors.RESET
 
 # REMOVED: create_line_graph() - unused function (replaced by create_mini_chart)
 
@@ -2150,69 +2170,68 @@ def format_output_full(ctx, terminal_width=None):
                                                                 max_branch_len=10, max_dir_len=10)
                                 lines.append(" | ".join(line1_parts))
 
-    # Line 2: Compact tokens
-    if ctx['show_line2']:
-        line2_parts = []
-        percentage = ctx['percentage']
-        compact_display = format_token_count(ctx['compact_tokens'])
-        percentage_color = get_percentage_color(percentage)
+    # Combined line: ctx ... │ 5h ... │ 7d ... │ Model
+    if ctx['show_line2'] or ctx['show_line3']:
+        DIM = Colors.DIM
+        R = Colors.RESET
+        parts = []
 
-        if percentage >= 90:
-            title_color = f"{Colors.BG_RED}{Colors.BRIGHT_WHITE}{Colors.BOLD}"
-            percentage_display = f"{Colors.BG_RED}{Colors.BRIGHT_WHITE}{Colors.BOLD}[{percentage}%]{Colors.RESET}"
-            compact_label = f"{title_color}Compact:{Colors.RESET}"
-        else:
-            compact_label = f"{Colors.BRIGHT_CYAN}Compact:{Colors.RESET}"
-            percentage_display = f"{percentage_color}{Colors.BOLD}[{percentage}%]{Colors.RESET}"
+        # ctx: braille bar + percentage + token counts
+        if ctx['show_line2']:
+            percentage = ctx['percentage']
+            compact_display = format_token_count_short(ctx['compact_tokens'])
+            threshold_display = format_token_count_short(ctx['compaction_threshold'])
+            ctx_color = _truecolor_gradient(percentage)
+            ctx_part = f"{DIM}ctx{R} {get_progress_bar(percentage, total_dots=50)} {ctx_color}{percentage}%{R} {DIM}{compact_display}/{threshold_display}{R}"
+            parts.append(ctx_part)
 
-        line2_parts.append(compact_label)
-        line2_parts.append(get_progress_bar(percentage, width=20))
-        line2_parts.append(percentage_display)
-        line2_parts.append(f"{Colors.BRIGHT_WHITE}{compact_display}/{format_token_count(ctx['compaction_threshold'])}{Colors.RESET}")
+        # 5h / 7d rate limits
+        if ctx['show_line3']:
+            primary = get_primary_session_data(ctx)
+            usage_pct = primary['five_hour']
+            weekly_pct = primary['weekly']
 
-        if ctx['cache_ratio'] >= 50:
-            line2_parts.append(f"{Colors.BRIGHT_GREEN}♻️ {int(ctx['cache_ratio'])}% cached{Colors.RESET}")
+            if usage_pct > 0 or weekly_pct > 0:
+                # 5h
+                five_color = _truecolor_gradient(usage_pct)
+                five_part = f"{DIM}5h{R} {get_progress_bar(usage_pct, total_dots=50)} {five_color}{int(usage_pct)}%{R}"
+                if primary['resets_at']:
+                    five_part += f" {DIM}{primary['resets_at']}{R}"
+                parts.append(five_part)
 
-        # Model name (moved from Line 1)
+                # 7d
+                week_color = _truecolor_gradient(weekly_pct)
+                weekly_reset = format_weekly_usage_suffix(
+                    weekly_pct, primary['weekly_reset_at'], primary['weekly_remaining'],
+                )
+                week_part = f"{DIM}7d{R} {get_progress_bar(weekly_pct, total_dots=50)} {week_color}{int(weekly_pct)}%{R}"
+                if weekly_reset.strip():
+                    week_part += f" {DIM}{weekly_reset.strip()}{R}"
+                parts.append(week_part)
+
+        # Model name
         model_name = shorten_model_name(ctx['model'])
-        line2_parts.append(f"{Colors.BRIGHT_YELLOW}[{model_name}]{Colors.RESET}")
+        parts.append(f"{DIM}{model_name}{R}")
 
+        lines.append(f" {DIM}\u2502{R} ".join(parts))
+
+        # Line 2: GLM/Codex (separate line)
+        if ctx['show_line3']:
+            service_snippets = format_service_snippets(
+                ctx,
+                'full',
+                include_claude=primary.get('include_claude_secondary', False),
+                include_codex=primary.get('include_codex_secondary', True),
+            )
+            if service_snippets:
+                DIM = Colors.DIM
+                R = Colors.RESET
+                lines.append(f" {DIM}\u2502{R} ".join(service_snippets))
+
+        # Handover status
         handover = ctx.get('handover_status', '')
         if handover:
-            line2_parts.append(handover)
-
-        lines.append(" ".join(line2_parts))
-
-    # Line 3: Session usage (runtime-aware primary + secondary services)
-    if ctx['show_line3']:
-        primary = get_primary_session_data(ctx)
-        usage_pct = primary['five_hour']
-        service_snippets = format_service_snippets(
-            ctx,
-            'full',
-            include_claude=primary['include_claude_secondary'],
-            include_codex=primary['include_codex_secondary'],
-        )
-        if usage_pct > 0 or primary['weekly'] > 0 or service_snippets:
-            line3_parts = []
-            line3_parts.append(f"{primary['label_color']}{primary['name']}:{Colors.RESET}")
-            line3_parts.append(get_progress_bar(usage_pct, width=20))
-            usage_color = get_percentage_color(usage_pct)
-            line3_parts.append(f"{usage_color}{Colors.BOLD}[{int(usage_pct)}%]{Colors.RESET}")
-            if primary['resets_at']:
-                line3_parts.append(f"{Colors.BRIGHT_WHITE}resets {primary['resets_at']}{Colors.RESET}")
-            reset_suffix = format_weekly_usage_suffix(
-                primary['weekly'],
-                primary['weekly_reset_at'],
-                primary['weekly_remaining'],
-            )
-            line3_parts.append(f"{Colors.BRIGHT_WHITE}(wk{int(primary['weekly'])}%{reset_suffix}){Colors.RESET}")
-            line3_parts.extend(service_snippets)
-            lines.append(" ".join(line3_parts))
-
-    # Line 4: Burn rate
-    if ctx['show_line4'] and ctx['burn_line']:
-        lines.append(ctx['burn_line'])
+            lines.append(handover)
 
     return lines
 
@@ -2256,7 +2275,7 @@ def format_output_compact(ctx):
         threshold_display = format_token_count_short(ctx['compaction_threshold'])
         percentage_color = get_percentage_color(percentage)
 
-        line2 = f"{Colors.BRIGHT_CYAN}C:{Colors.RESET} {get_progress_bar(percentage, width=12)} "
+        line2 = f"{Colors.BRIGHT_CYAN}C:{Colors.RESET} {get_progress_bar(percentage, total_dots=48)} "
         line2 += f"{percentage_color}[{percentage}%]{Colors.RESET} "
         line2 += f"{Colors.BRIGHT_WHITE}{compact_display}/{threshold_display}{Colors.RESET}"
         lines.append(line2)
@@ -2274,7 +2293,7 @@ def format_output_compact(ctx):
         if usage_pct > 0 or primary['weekly'] > 0 or service_snippets:
             line3_parts = []
             usage_color = get_percentage_color(usage_pct)
-            primary_part = f"{primary['label_color']}{primary['short_label']}:{Colors.RESET} {get_progress_bar(usage_pct, width=12)} "
+            primary_part = f"{primary['label_color']}{primary['short_label']}:{Colors.RESET} {get_progress_bar(usage_pct, total_dots=48)} "
             primary_part += f"{usage_color}[{int(usage_pct)}%]{Colors.RESET}"
             if primary['resets_at']:
                 primary_part += f" {Colors.BRIGHT_WHITE}→{primary['resets_at']}{Colors.RESET}"
@@ -2323,7 +2342,7 @@ def format_output_tight(ctx):
         compact_display = format_token_count_short(ctx['compact_tokens'])
         percentage_color = get_percentage_color(percentage)
 
-        line2 = f"{Colors.BRIGHT_CYAN}C:{Colors.RESET} {get_progress_bar(percentage, width=8)} "
+        line2 = f"{Colors.BRIGHT_CYAN}C:{Colors.RESET} {get_progress_bar(percentage, total_dots=48)} "
         line2 += f"{percentage_color}[{percentage}%]{Colors.RESET} {Colors.BRIGHT_WHITE}{compact_display}{Colors.RESET}"
         lines.append(line2)
 
@@ -2333,7 +2352,7 @@ def format_output_tight(ctx):
         usage_pct = primary['five_hour']
         if usage_pct > 0 or primary['weekly'] > 0:
             usage_color = get_percentage_color(usage_pct)
-            line3 = f"{primary['label_color']}{primary['short_label']}:{Colors.RESET} {get_progress_bar(usage_pct, width=8)} "
+            line3 = f"{primary['label_color']}{primary['short_label']}:{Colors.RESET} {get_progress_bar(usage_pct, total_dots=48)} "
             line3 += f"{usage_color}[{int(usage_pct)}%]{Colors.RESET}"
             lines.append(line3)
 
@@ -2565,13 +2584,14 @@ def format_usage_snippet(name, five_hour, weekly, mode, label_color, weekly_rese
     if not show_when_zero and five_hour <= 0 and weekly <= 0:
         return None
 
-    filled = max(1, int(4 * five_hour / 100)) if five_hour > 0 else 0
-    bar = get_percentage_color(five_hour) + '█' * filled + Colors.LIGHT_GRAY + '▒' * (4 - filled) + Colors.RESET
-    color = get_percentage_color(five_hour)
-    snippet = f"{label_color}{name}:{Colors.RESET}{bar}{color}{five_hour}%{Colors.RESET}"
-    if mode == 'full' and (weekly > 0 or (show_when_zero and weekly_reset_at)):
-        reset_suffix = format_weekly_usage_suffix(weekly, weekly_reset_at, weekly_remaining)
-        snippet += f"{Colors.BRIGHT_WHITE}(wk{weekly}%{reset_suffix}){Colors.RESET}"
+    bar = get_progress_bar(five_hour, total_dots=50, min_one_dot=True)
+    color = _truecolor_gradient(five_hour)
+    DIM = Colors.DIM
+    R = Colors.RESET
+    snippet = f"{label_color}{name}{R} {bar} {color}{five_hour}%{R}"
+    reset_suffix = format_weekly_usage_suffix(weekly, weekly_reset_at, weekly_remaining).strip()
+    if reset_suffix:
+        snippet += f" {DIM}{reset_suffix}{R}"
     return snippet
 
 
@@ -2628,7 +2648,7 @@ def format_service_snippets(ctx, mode, include_claude=False, include_codex=True)
 
     for name, key_prefix, label_color in [
         ('GLM', 'glm', Colors.BRIGHT_CYAN),
-        ('Codex', 'codex', Colors.BRIGHT_YELLOW),
+        ('Cdx', 'codex', Colors.BRIGHT_YELLOW),
     ]:
         if name == 'Codex' and not include_codex:
             continue
