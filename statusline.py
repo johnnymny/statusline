@@ -2173,6 +2173,10 @@ def format_output_full(ctx, terminal_width=None):
         if ctx['cache_ratio'] >= 50:
             line2_parts.append(f"{Colors.BRIGHT_GREEN}♻️ {int(ctx['cache_ratio'])}% cached{Colors.RESET}")
 
+        # Model name (moved from Line 1)
+        model_name = shorten_model_name(ctx['model'])
+        line2_parts.append(f"{Colors.BRIGHT_YELLOW}[{model_name}]{Colors.RESET}")
+
         handover = ctx.get('handover_status', '')
         if handover:
             line2_parts.append(handover)
@@ -2197,13 +2201,12 @@ def format_output_full(ctx, terminal_width=None):
             line3_parts.append(f"{usage_color}{Colors.BOLD}[{int(usage_pct)}%]{Colors.RESET}")
             if primary['resets_at']:
                 line3_parts.append(f"{Colors.BRIGHT_WHITE}resets {primary['resets_at']}{Colors.RESET}")
-            if primary['weekly'] > 0:
-                reset_suffix = format_weekly_usage_suffix(
-                    primary['weekly'],
-                    primary['weekly_reset_at'],
-                    primary['weekly_remaining'],
-                )
-                line3_parts.append(f"{Colors.BRIGHT_WHITE}(wk{int(primary['weekly'])}%{reset_suffix}){Colors.RESET}")
+            reset_suffix = format_weekly_usage_suffix(
+                primary['weekly'],
+                primary['weekly_reset_at'],
+                primary['weekly_remaining'],
+            )
+            line3_parts.append(f"{Colors.BRIGHT_WHITE}(wk{int(primary['weekly'])}%{reset_suffix}){Colors.RESET}")
             line3_parts.extend(service_snippets)
             lines.append(" ".join(line3_parts))
 
@@ -2523,9 +2526,6 @@ def _fetch_codex_usage(access_token):
     five_hour_pct = primary.get('used_percent', 0)
     weekly_pct = secondary.get('used_percent', 0) if secondary else 0
 
-    if five_hour_pct == 0 and weekly_pct == 0:
-        return None
-
     result = {'five_hour_pct': five_hour_pct, 'weekly_pct': weekly_pct}
     reset_after = primary.get('reset_after_seconds')
     if reset_after:
@@ -2539,9 +2539,6 @@ def _fetch_codex_usage(access_token):
 
 def format_weekly_usage_suffix(weekly, weekly_reset_at=0, weekly_remaining=''):
     """Format weekly reset suffix for usage displays."""
-    if weekly <= 0:
-        return ''
-
     if weekly_remaining:
         return f' {weekly_remaining}'
 
@@ -2572,7 +2569,7 @@ def format_usage_snippet(name, five_hour, weekly, mode, label_color, weekly_rese
     bar = get_percentage_color(five_hour) + '█' * filled + Colors.LIGHT_GRAY + '▒' * (4 - filled) + Colors.RESET
     color = get_percentage_color(five_hour)
     snippet = f"{label_color}{name}:{Colors.RESET}{bar}{color}{five_hour}%{Colors.RESET}"
-    if mode == 'full' and weekly > 0:
+    if mode == 'full' and (weekly > 0 or (show_when_zero and weekly_reset_at)):
         reset_suffix = format_weekly_usage_suffix(weekly, weekly_reset_at, weekly_remaining)
         snippet += f"{Colors.BRIGHT_WHITE}(wk{weekly}%{reset_suffix}){Colors.RESET}"
     return snippet
@@ -2642,6 +2639,7 @@ def format_service_snippets(ctx, mode, include_claude=False, include_codex=True)
             mode,
             label_color,
             weekly_reset_at=ctx.get(f'{key_prefix}_weekly_reset_at', 0),
+            show_when_zero=ctx.get(f'{key_prefix}_configured', False),
         )
         if snippet:
             snippets.append(snippet)
@@ -3028,28 +3026,27 @@ def main():
             'is_codex_runtime': bool(proxy_port),
         }
 
-        # Fetch Claude.ai usage data
-        usage_data = get_claude_usage()
-        if usage_data:
-            five_hour = usage_data.get('five_hour', {})
-            ctx['usage_five_hour'] = five_hour.get('utilization', 0) or 0
-            resets_at_str = five_hour.get('resets_at', '')
-            if resets_at_str:
+        # Claude.ai usage data from rate_limits (v2.1.80+, provided via stdin)
+        rate_limits = data.get('rate_limits', {})
+        if rate_limits:
+            rl_five = rate_limits.get('five_hour', {})
+            ctx['usage_five_hour'] = rl_five.get('used_percentage', 0)
+            rl_five_resets = rl_five.get('resets_at')
+            if rl_five_resets:
                 try:
-                    resets_dt = datetime.fromisoformat(resets_at_str)
-                    local_dt = resets_dt.astimezone()
-                    ctx['usage_resets_at'] = local_dt.strftime("%H:%M")
+                    resets_dt = datetime.fromtimestamp(rl_five_resets, tz=timezone.utc).astimezone()
+                    ctx['usage_resets_at'] = resets_dt.strftime("%H:%M")
                 except Exception:
                     ctx['usage_resets_at'] = ''
             else:
                 ctx['usage_resets_at'] = ''
-            seven_day = usage_data.get('seven_day', {})
-            ctx['usage_seven_day'] = seven_day.get('utilization', 0) if seven_day else 0
-            seven_day_resets = seven_day.get('resets_at', '') if seven_day else ''
-            if seven_day_resets:
+            rl_seven = rate_limits.get('seven_day', {})
+            ctx['usage_seven_day'] = rl_seven.get('used_percentage', 0)
+            rl_seven_resets = rl_seven.get('resets_at')
+            if rl_seven_resets:
                 try:
-                    resets_dt = datetime.fromisoformat(seven_day_resets)
-                    now = datetime.now(resets_dt.tzinfo)
+                    resets_dt = datetime.fromtimestamp(rl_seven_resets, tz=timezone.utc)
+                    now = datetime.now(timezone.utc)
                     delta = resets_dt - now
                     total_seconds = max(int(delta.total_seconds()), 0)
                     days = total_seconds // 86400
@@ -3060,10 +3057,42 @@ def main():
             else:
                 ctx['usage_seven_day_remaining'] = ''
         else:
-            ctx['usage_five_hour'] = 0
-            ctx['usage_resets_at'] = ''
-            ctx['usage_seven_day'] = 0
-            ctx['usage_seven_day_remaining'] = ''
+            # Fallback: HTTPS fetch for older Claude Code versions
+            usage_data = get_claude_usage()
+            if usage_data:
+                five_hour = usage_data.get('five_hour', {})
+                ctx['usage_five_hour'] = five_hour.get('utilization', 0) or 0
+                resets_at_str = five_hour.get('resets_at', '')
+                if resets_at_str:
+                    try:
+                        resets_dt = datetime.fromisoformat(resets_at_str)
+                        local_dt = resets_dt.astimezone()
+                        ctx['usage_resets_at'] = local_dt.strftime("%H:%M")
+                    except Exception:
+                        ctx['usage_resets_at'] = ''
+                else:
+                    ctx['usage_resets_at'] = ''
+                seven_day = usage_data.get('seven_day', {})
+                ctx['usage_seven_day'] = seven_day.get('utilization', 0) if seven_day else 0
+                seven_day_resets = seven_day.get('resets_at', '') if seven_day else ''
+                if seven_day_resets:
+                    try:
+                        resets_dt = datetime.fromisoformat(seven_day_resets)
+                        now = datetime.now(resets_dt.tzinfo)
+                        delta = resets_dt - now
+                        total_seconds = max(int(delta.total_seconds()), 0)
+                        days = total_seconds // 86400
+                        hours = (total_seconds % 86400) // 3600
+                        ctx['usage_seven_day_remaining'] = f"{days}d{hours}h" if days > 0 else f"{hours}h"
+                    except Exception:
+                        ctx['usage_seven_day_remaining'] = ''
+                else:
+                    ctx['usage_seven_day_remaining'] = ''
+            else:
+                ctx['usage_five_hour'] = 0
+                ctx['usage_resets_at'] = ''
+                ctx['usage_seven_day'] = 0
+                ctx['usage_seven_day_remaining'] = ''
 
         # Fetch GLM/Codex usage data (clamp to 0-100, guard non-dict)
         services_usage = get_services_usage()
@@ -3077,9 +3106,11 @@ def main():
         ctx['glm_five_hour'] = _clamp_pct(services_usage.get('glm', {}).get('five_hour_pct', 0))
         ctx['glm_weekly'] = _clamp_pct(services_usage.get('glm', {}).get('weekly_pct', 0))
         ctx['glm_weekly_reset_at'] = services_usage.get('glm', {}).get('weekly_reset_at', 0)
+        ctx['glm_configured'] = 'glm' in services_usage
         ctx['codex_five_hour'] = _clamp_pct(services_usage.get('codex', {}).get('five_hour_pct', 0))
         ctx['codex_weekly'] = _clamp_pct(services_usage.get('codex', {}).get('weekly_pct', 0))
         ctx['codex_weekly_reset_at'] = services_usage.get('codex', {}).get('weekly_reset_at', 0)
+        ctx['codex_configured'] = 'codex' in services_usage
         codex_reset_after = services_usage.get('codex', {}).get('reset_after_sec', 0)
         if codex_reset_after:
             try:
