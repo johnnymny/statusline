@@ -2584,11 +2584,11 @@ def format_usage_snippet(name, five_hour, weekly, mode, label_color, weekly_rese
     if not show_when_zero and five_hour <= 0 and weekly <= 0:
         return None
 
-    bar = get_progress_bar(five_hour, total_dots=50, min_one_dot=True)
-    color = _truecolor_gradient(five_hour)
+    bar = get_progress_bar(weekly, total_dots=50, min_one_dot=True)
+    color = _truecolor_gradient(weekly)
     DIM = Colors.DIM
     R = Colors.RESET
-    snippet = f"{label_color}{name}{R} {bar} {color}{five_hour}%{R}"
+    snippet = f"{label_color}{name}{R} {bar} {color}{weekly}%{R}"
     reset_suffix = format_weekly_usage_suffix(weekly, weekly_reset_at, weekly_remaining).strip()
     if reset_suffix:
         snippet += f" {DIM}{reset_suffix}{R}"
